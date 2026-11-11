@@ -8,7 +8,7 @@ The implementation is based on the same generation-path intervention used by the
 
 - Adds a `Krea2 Enhancer` accordion to the Forge Neo generation UI.
 - Can be enabled or disabled per generation.
-- Provides a single `Strength` control.
+- Provides `Strength` and `Text Scale` controls.
 - Uses `0.5` as the default strength.
 - Automatically skips non-Krea2 models.
 - Does not modify prompts, conditioning text, checkpoints, or saved model files.
@@ -24,7 +24,8 @@ When enabled, the extension:
 3. Applies the enhancer profile to selected internal text-conditioning chunks.
 4. Runs the adjusted text-fusion path.
 5. Blends the delta back with a per-token relative cap to keep the effect bounded.
-6. Restores the original model forward path immediately after the UNet call.
+6. Optionally scales the fused text tokens after `txtmlp`, as in the ComfyUI Advanced node.
+7. Restores the original model forward path immediately after the UNet call.
 
 The patch is runtime-only. It is applied through Forge Neo's `model_function_wrapper` and is removed after each wrapped diffusion-model call.
 
@@ -34,6 +35,7 @@ The patch is runtime-only. It is applied through Forge Neo's `model_function_wra
 | --- | ---: | ---: | --- |
 | Enabled | Off | On/Off | Turns Krea2 Enhancer on for the current generation. |
 | Strength | `0.5` | `0.0` to `2.0` | Controls how strongly the internal text-fusion adjustment is applied. `0.0` is neutral. |
+| Text Scale | `1.0` | `0.25` to `4.0` | Multiplies fused text tokens after `txtmlp`. `1.0` is neutral; the ComfyUI Advanced node suggests `1.5` to `2.0` as a starting range. |
 
 ## Installation
 
@@ -62,10 +64,11 @@ Restart Forge Neo after installation.
 
 This extension is intended for Forge Neo builds that include Krea 2 model support.
 
-It checks for the Krea 2 `12 x 2560` text-conditioning layout before applying the patch. If the loaded diffusion model does not match that layout, the extension does nothing.
+It checks for the Krea 2 `12 x 2560` text-conditioning layout and text-fusion modules before applying the patch. If the loaded diffusion model does not match that layout, the extension does nothing.
 
 ## Notes
 
+- The ComfyUI copy also includes a Turbo sigma scheduler and an attention-weighted phrase encoder. Those are separate nodes with sampler and text-encoder inputs, rather than additional settings for this enhancer.
 - The debug option from the ComfyUI node is intentionally not exposed in the Forge Neo UI.
 - The extension may increase sampling cost because it evaluates the text-fusion path twice while enabled.
 - Effects depend on the prompt, sampler settings, and selected Krea 2 checkpoint.

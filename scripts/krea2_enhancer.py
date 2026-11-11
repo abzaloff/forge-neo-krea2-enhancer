@@ -30,7 +30,9 @@ def _is_krea2_dm(dm: Any) -> bool:
         hasattr(dm, "txtfusion")
         and hasattr(dm, "txtmlp")
         and hasattr(dm, "blocks")
-        and hasattr(dm, "_unpack_context")
+        and hasattr(dm.txtfusion, "layerwise_blocks")
+        and hasattr(dm.txtfusion, "projector")
+        and hasattr(dm.txtfusion, "refiner_blocks")
         and txtlayers == len(KREA2_TAP_LAYERS)
         and txtdim == KREA2_TAP_DIM
     )
@@ -70,11 +72,11 @@ def _run_txtfusion_parts(txtfusion, x, mask=None, transformer_options=None):
     return _run_refiners(txtfusion, projected, mask=mask, transformer_options=transformer_options)
 
 
-def _enhanced_txtfusion_forward(txtfusion, x, mask=None, transformer_options=None, strength=1.0):
+def _enhanced_txtfusion_forward(txtfusion, x, original_forward, mask=None, transformer_options=None, strength=1.0):
     transformer_options = transformer_options or {}
     b, seq, taps, dim = x.shape
     if taps != len(KREA2_TAP_LAYERS) or dim != KREA2_TAP_DIM:
-        return txtfusion._krea2_enhancer_original_forward(x, mask=mask, transformer_options=transformer_options)
+        return original_forward(x, mask=mask, transformer_options=transformer_options)
 
     reference_out = _run_txtfusion_parts(txtfusion, x, mask=mask, transformer_options=transformer_options)
 
@@ -99,7 +101,7 @@ def _call_model_function(model_function, kwargs):
     return model_function(kwargs["input"], kwargs["timestep"], **kwargs["c"])
 
 
-def _make_unet_wrapper(diffusion_model, strength: float, previous_wrapper=None):
+def _make_unet_wrapper(diffusion_model, strength: float, text_scale: float = 1.0, previous_wrapper=None):
     def krea2_enhancer_wrapper(model_function, kwargs):
         if not _is_krea2_dm(diffusion_model):
             if previous_wrapper is not None:
@@ -107,33 +109,33 @@ def _make_unet_wrapper(diffusion_model, strength: float, previous_wrapper=None):
             return _call_model_function(model_function, kwargs)
 
         txtfusion = diffusion_model.txtfusion
-        if hasattr(txtfusion, "_krea2_enhancer_original_forward"):
-            txtfusion.forward = txtfusion._krea2_enhancer_original_forward
-            delattr(txtfusion, "_krea2_enhancer_original_forward")
-
         original_forward = txtfusion.forward
+        original_txtmlp_forward = diffusion_model.txtmlp.forward
 
         def enhanced_forward(x_in, mask=None, transformer_options=None):
-            txtfusion._krea2_enhancer_original_forward = original_forward
-            try:
-                return _enhanced_txtfusion_forward(
-                    txtfusion,
-                    x_in,
-                    mask=mask,
-                    transformer_options=transformer_options or {},
-                    strength=strength,
-                )
-            finally:
-                if hasattr(txtfusion, "_krea2_enhancer_original_forward"):
-                    delattr(txtfusion, "_krea2_enhancer_original_forward")
+            return _enhanced_txtfusion_forward(
+                txtfusion,
+                x_in,
+                original_forward,
+                mask=mask,
+                transformer_options=transformer_options or {},
+                strength=strength,
+            )
+
+        def scaled_txtmlp_forward(y):
+            return original_txtmlp_forward(y) * text_scale
 
         try:
-            txtfusion.forward = enhanced_forward
+            if strength != 0.0:
+                txtfusion.forward = enhanced_forward
+            if text_scale != 1.0:
+                diffusion_model.txtmlp.forward = scaled_txtmlp_forward
             if previous_wrapper is not None:
                 return previous_wrapper(model_function, kwargs)
             return _call_model_function(model_function, kwargs)
         finally:
             txtfusion.forward = original_forward
+            diffusion_model.txtmlp.forward = original_txtmlp_forward
 
     return krea2_enhancer_wrapper
 
@@ -156,19 +158,30 @@ class Krea2EnhancerForForge(scripts.ScriptBuiltinUI):
                 step=0.05,
                 label="Strength",
             )
+            text_scale = gr.Slider(
+                minimum=0.25,
+                maximum=4.0,
+                value=1.0,
+                step=0.05,
+                label="Text Scale",
+            )
 
-        for comp in (enable, strength):
+        for comp in (enable, strength, text_scale):
             comp.do_not_save_to_config = True
 
-        self.infotext_fields = [(strength, "Krea2 Enhancer Strength")]
-        return [enable, strength]
+        self.infotext_fields = [
+            (strength, "Krea2 Enhancer Strength"),
+            (text_scale, "Krea2 Enhancer Text Scale"),
+        ]
+        return [enable, strength, text_scale]
 
-    def process_before_every_sampling(self, p, enable: bool, strength: float, *args, **kwargs):
+    def process_before_every_sampling(self, p, enable: bool, strength: float, text_scale: float = 1.0, *args, **kwargs):
         if not enable:
             return
 
         strength = _bounded_float(strength, 0.5, 0.0, 2.0)
-        if strength == 0.0:
+        text_scale = _bounded_float(text_scale, 1.0, 0.25, 4.0)
+        if strength == 0.0 and text_scale == 1.0:
             return
 
         unet = p.sd_model.forge_objects.unet.clone()
@@ -178,7 +191,8 @@ class Krea2EnhancerForForge(scripts.ScriptBuiltinUI):
 
         previous_wrapper = unet.model_options.get("model_function_wrapper")
 
-        unet.set_model_unet_function_wrapper(_make_unet_wrapper(diffusion_model, strength, previous_wrapper))
+        unet.set_model_unet_function_wrapper(_make_unet_wrapper(diffusion_model, strength, text_scale, previous_wrapper))
         p.sd_model.forge_objects.unet = unet
         p.extra_generation_params["Krea2 Enhancer"] = True
         p.extra_generation_params["Krea2 Enhancer Strength"] = strength
+        p.extra_generation_params["Krea2 Enhancer Text Scale"] = text_scale
